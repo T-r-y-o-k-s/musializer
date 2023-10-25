@@ -823,7 +823,24 @@ static void preview_screen(void)
         }
 
         // TODO: add button to start rendering
-        // TODO: add tooltips to all the buttons tha describe their function and associated keyboard shortcuts
+        // TODO: add tooltips to all the buttons that describe their function and associated keyboard shortcuts
+
+        // the mess below checks whether the current track finished playing
+        if (round((GetMusicTimeLength(track->music) - GetMusicTimePlayed(track->music))*2*10) == 0) {
+            // The difference between the total length and the time played scales correctly with the length. 
+            // (As opposed to taking the ratio, which would result in cutting off the last few seconds of very long tracks.)
+            // *2 reduces the time that gets cut off.
+            // *10 shifts the digits so that round() actually means something.
+            // The result is rounded to make it easier to detect having reached the end of the track.
+            
+            StopMusicStream(track->music);
+            
+            size_t next = p->current_track + 1;
+            if (next == p->tracks.count) next = 0;
+            
+            PlayMusicStream(p->tracks.items[next].music);
+            p->current_track = next;
+        }
 
         size_t m = fft_analyze(GetFrameTime());
 
