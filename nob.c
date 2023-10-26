@@ -11,8 +11,6 @@
 
 typedef enum {
     TARGET_LINUX,
-    // TODO: TARGET_WIN64_MINGW right now means cross compilation from Linux to Windows using mingw-w64
-    // I think the naming should be more explicit about that
     TARGET_WIN64_MINGW,
     TARGET_WIN64_MSVC,
     TARGET_MACOS,
@@ -294,7 +292,13 @@ bool build_musializer(Config config)
                 nob_return_defer(false);
             } else {
                 cmd.count = 0;
+                #ifdef _WIN32
+                    // On windows, mingw doesn't have the `x86_64-w64-mingw32-` prefix for windres.
+                    // For gcc, you can use both `x86_64-w64-mingw32-gcc` and just `gcc`
+                    nob_cmd_append(&cmd, "windres");
+                #else
                     nob_cmd_append(&cmd, "x86_64-w64-mingw32-windres");
+                #endif // _WIN32
                     nob_cmd_append(&cmd, "./src/musializer.rc");
                     nob_cmd_append(&cmd, "-O", "coff");
                     nob_cmd_append(&cmd, "-o", "./build/musializer.res");
@@ -327,6 +331,12 @@ bool build_musializer(Config config)
                 nob_return_defer(false);
             } else {
                 cmd.count = 0;
+                    nob_cmd_append(&cmd, "rc");
+                    nob_cmd_append(&cmd, "/fo", "./build/musializer.res");
+                    nob_cmd_append(&cmd, "./src/musializer.rc");
+                    // NOTE: Do not change the order of commandline arguments to rc. Their argparser is weird.
+                if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
+                cmd.count = 0;
                     nob_cmd_append(&cmd, "cl.exe");
                     if (config.microphone) nob_cmd_append(&cmd, "/DFEATURE_MICROPHONE");
                     nob_cmd_append(&cmd, "/I", "./raylib/raylib-4.5.0/src/");
@@ -336,13 +346,12 @@ bool build_musializer(Config config)
                         "./src/plug.c",
                         "./src/ffmpeg_windows.c"
                         // TODO: building resource file is not implemented for TARGET_WIN64_MSVC
-                        //"./build/musializer.res"
                         );
                     nob_cmd_append(&cmd,
                         "/link",
                         nob_temp_sprintf("/LIBPATH:build/raylib/%s", NOB_ARRAY_GET(target_names, config.target)),
                         "raylib.lib");
-                    nob_cmd_append(&cmd, "Winmm.lib", "gdi32.lib", "User32.lib", "Shell32.lib");
+                    nob_cmd_append(&cmd, "Winmm.lib", "gdi32.lib", "User32.lib", "Shell32.lib", "./build/musializer.res");
                     // TODO: is some sort of `-static` flag needed for MSVC to get a statically linked executable
                     //nob_cmd_append(&cmd, "-static");
                 if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
