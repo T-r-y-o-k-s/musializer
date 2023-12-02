@@ -36,7 +36,7 @@ I really recommend to read [nob.c](./nob.c) and [nob.h](./src/nob.h) to get an i
 ### Linux
 
 ```console
-$ cc -o nob nob.c # only once
+$ cc -o nob nob.c # ONLY ONCE!!!
 $ ./nob
 $ ./build/musializer
 ```
@@ -48,7 +48,7 @@ Keep in mind that the application needs [./resources/](./resources/) to be prese
 From within `vcvarsall.bat` do
 
 ```console
-> cl.exe nob.c # only once
+> cl.exe nob.c # ONLY ONCE!!!
 > nob.exe
 > build\musializer.exe
 ```
@@ -57,9 +57,9 @@ From within `vcvarsall.bat` do
 
 Install [MinGW-w64](https://www.mingw-w64.org/) from your distro repository.
 
+Edit `./build/config.h` and set `MUSIALIZER_TARGET` to `TARGET_WIN64_MINGW`.
+
 ```console
-$ cc -o nob nob.c # only once
-$ ./nob config -t win64-mingw
 $ ./nob
 $ wine ./build/musializer.exe
 ```
@@ -68,13 +68,13 @@ $ wine ./build/musializer.exe
 
 **Only on Linux for now**
 
+Edit `./build/config.h` and enable `MUSIALIZER_HOTRELOAD`.
+
 ```console
-$ cc -o nob nob.c # only once
-$ ./nob config -r
 $ ./nob
 $ ./build/musializer
 ```
 
 Keep the app running. Rebuild with `./nob`. Hot reload by focusing on the window of the app and pressing <kbd>h</kbd>.
 
-The way it works is by putting the majority of the logic of the application into a `libplug` dynamic library and just reloading it when requested. The [rpath](https://en.wikipedia.org/wiki/Rpath) (aka hard-coded run-time search path) for that library is set to `.` and `./build/`. See [build.sh](./build.sh) for more information on how everything is configured.
+The way it works is by putting the majority of the logic of the application into a `libplug` dynamic library and just reloading it when requested. The [rpath](https://en.wikipedia.org/wiki/Rpath) (aka hard-coded run-time search path) for that library is set to `.` and `./build/`. See [src/nob_linux.c](src/nob_linux.c) for more information on how everything is configured.

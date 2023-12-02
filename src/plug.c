@@ -1,10 +1,12 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <math.h>
 #include <string.h>
 #include <complex.h>
 
+#include "config.h"
 #include "plug.h"
 #include "ffmpeg.h"
 #define NOB_IMPLEMENTATION
@@ -18,7 +20,7 @@
 
 #define GLSL_VERSION 330
 
-#define N (1<<13)
+#define FFT_SIZE (1<<13)
 #define FONT_SIZE 64
 
 #define RENDER_FPS 30
@@ -40,6 +42,12 @@
 #define HUD_BUTTON_SIZE 50
 #define HUD_BUTTON_MARGIN 50
 #define HUD_ICON_SCALE 0.5
+
+#define KEY_TOGGLE_PLAY KEY_SPACE
+#define KEY_RENDER      KEY_R
+#define KEY_FULLSCREEN  KEY_F
+#define KEY_CAPTURE     KEY_C
+#define KEY_TOGGLE_MUTE KEY_M
 
 // Microsoft could not update their parser OMEGALUL:
 // https://learn.microsoft.com/en-us/cpp/c-runtime-library/complex-math-support?view=msvc-170#types-used-in-complex-math
@@ -138,18 +146,20 @@ typedef struct {
     FFMPEG *ffmpeg;
 
     // FFT Analyzer
-    float in_raw[N];
-    float in_win[N];
-    Float_Complex out_raw[N];
-    float out_log[N];
-    float out_smooth[N];
-    float out_smear[N];
+    float in_raw[FFT_SIZE];
+    float in_win[FFT_SIZE];
+    Float_Complex out_raw[FFT_SIZE];
+    float out_log[FFT_SIZE];
+    float out_smooth[FFT_SIZE];
+    float out_smear[FFT_SIZE];
 
-#ifdef FEATURE_MICROPHONE
+    uint64_t active_button_id;
+
+#ifdef MUSIALIZER_MICROPHONE
     // Microphone
     bool capturing;
     ma_device *microphone;
-#endif // FEATURE_MICROPHONE
+#endif // MUSIALIZER_MICROPHONE
 } Plug;
 
 static Plug *p = NULL;
@@ -196,7 +206,7 @@ static void assets_unload_everything(void)
 static bool fft_settled(void)
 {
     float eps = 1e-3;
-    for (size_t i = 0; i < N; ++i) {
+    for (size_t i = 0; i < FFT_SIZE; ++i) {
         if (p->out_smooth[i] > eps) return false;
         if (p->out_smear[i] > eps) return false;
     }
@@ -245,24 +255,24 @@ static inline float amp(Float_Complex z)
 static size_t fft_analyze(float dt)
 {
     // Apply the Hann Window on the Input - https://en.wikipedia.org/wiki/Hann_function
-    for (size_t i = 0; i < N; ++i) {
-        float t = (float)i/(N - 1);
+    for (size_t i = 0; i < FFT_SIZE; ++i) {
+        float t = (float)i/(FFT_SIZE - 1);
         float hann = 0.5 - 0.5*cosf(2*PI*t);
         p->in_win[i] = p->in_raw[i]*hann;
     }
 
     // FFT
-    fft(p->in_win, 1, p->out_raw, N);
+    fft(p->in_win, 1, p->out_raw, FFT_SIZE);
 
     // "Squash" into the Logarithmic Scale
     float step = 1.06;
     float lowf = 1.0f;
     size_t m = 0;
     float max_amp = 1.0f;
-    for (float f = lowf; (size_t) f < N/2; f = ceilf(f*step)) {
+    for (float f = lowf; (size_t) f < FFT_SIZE/2; f = ceilf(f*step)) {
         float f1 = ceilf(f*step);
         float a = 0.0f;
-        for (size_t q = (size_t) f; q < N/2 && q < (size_t) f1; ++q) {
+        for (size_t q = (size_t) f; q < FFT_SIZE/2 && q < (size_t) f1; ++q) {
             float b = amp(p->out_raw[q]);
             if (b > a) a = b;
         }
@@ -379,8 +389,8 @@ static void fft_render(Rectangle boundary, size_t m)
 
 static void fft_push(float frame)
 {
-    memmove(p->in_raw, p->in_raw + 1, (N - 1)*sizeof(p->in_raw[0]));
-    p->in_raw[N-1] = frame;
+    memmove(p->in_raw, p->in_raw + 1, (FFT_SIZE - 1)*sizeof(p->in_raw[0]));
+    p->in_raw[FFT_SIZE-1] = frame;
 }
 
 static void callback(void *bufferData, unsigned int frames)
@@ -393,14 +403,14 @@ static void callback(void *bufferData, unsigned int frames)
     }
 }
 
-#ifdef FEATURE_MICROPHONE
+#ifdef MUSIALIZER_MICROPHONE
 static void ma_callback(ma_device *pDevice, void *pOutput, const void *pInput,ma_uint32 frameCount)
 {
     callback((void*)pInput,frameCount);
     (void)pOutput;
     (void)pDevice;
 }
-#endif // FEATURE_MICROPHONE
+#endif // MUSIALIZER_MICROPHONE
 
 static Track *current_track(void)
 {
@@ -445,7 +455,46 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     // TODO: visualize sound wave on the timeline
 }
 
-static void tracks_panel(Rectangle panel_boundary)
+typedef enum {
+    BS_NONE      = 0, // 00
+    BS_HOVEROVER = 1, // 01
+    BS_CLICKED   = 2, // 10
+} Button_State;
+
+static int button(uint64_t id, Rectangle boundary)
+{
+    Vector2 mouse = GetMousePosition();
+    int hoverover = CheckCollisionPointRec(mouse, boundary);
+    int clicked = 0;
+
+    if (p->active_button_id == 0) {
+        if (hoverover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            p->active_button_id = id;
+        }
+    } else if (p->active_button_id == id) {
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            p->active_button_id = 0;
+            if (hoverover) clicked = 1;
+        }
+    }
+
+    return (clicked<<1) | hoverover;
+}
+
+#define DJB2_INIT 5381
+
+uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
+{
+    const uint8_t *bytes = buf;
+    for (size_t i = 0; i < buf_sz; ++i) {
+        hash = hash*33 + bytes[i];
+    }
+    return hash;
+}
+
+#define tracks_panel(panel_boundary) \
+    tracks_panel_with_location(__FILE__, __LINE__, panel_boundary)
+static void tracks_panel_with_location(const char *file, int line, Rectangle panel_boundary)
 {
     DrawRectangleRec(panel_boundary, COLOR_TRACK_PANEL_BACKGROUND);
 
@@ -478,6 +527,10 @@ static void tracks_panel(Rectangle panel_boundary)
     if (panel_scroll > max_scroll) panel_scroll = max_scroll;
     float panel_padding = item_size*0.1;
 
+    uint64_t id = DJB2_INIT;
+    id = djb2(id, file, strlen(file));
+    id = djb2(id, &line, sizeof(line));
+
     BeginScissorMode(panel_boundary.x, panel_boundary.y, panel_boundary.width, panel_boundary.height);
     for (size_t i = 0; i < p->tracks.count; ++i) {
         // TODO: tooltip with filepath on each item in the panel
@@ -489,16 +542,19 @@ static void tracks_panel(Rectangle panel_boundary)
         };
         Color color;
         if (((int) i != p->current_track)) {
-            if (CheckCollisionPointRec(mouse, panel_boundary) && CheckCollisionPointRec(mouse, item_boundary)) {
-                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-                    Track *track = current_track();
-                    if (track) StopMusicStream(track->music);
-                    PlayMusicStream(p->tracks.items[i].music);
-                    p->current_track = i;
-                }
+            uint64_t item_id = djb2(id, &i, sizeof(i));
+
+            int state = button(item_id, GetCollisionRec(panel_boundary, item_boundary));
+            if (state & BS_HOVEROVER) {
                 color = COLOR_TRACK_BUTTON_HOVEROVER;
             } else {
                 color = COLOR_TRACK_BUTTON_BACKGROUND;
+            }
+            if (state & BS_CLICKED) {
+                Track *track = current_track();
+                if (track) StopMusicStream(track->music);
+                PlayMusicStream(p->tracks.items[i].music);
+                p->current_track = i;
             }
         } else {
             color = COLOR_TRACK_BUTTON_SELECTED;
@@ -520,12 +576,19 @@ static void tracks_panel(Rectangle panel_boundary)
         DrawTextEx(p->font, text, position, fontSize, 0, WHITE);
     }
 
-    // TODO: jump to specific place by clicking the scrollbar
     // TODO: up and down clickable buttons on the scrollbar
 
-    if (entire_scrollable_area > visible_area_size) {
+    if (entire_scrollable_area > visible_area_size) { // Is scrolling needed
         float t = visible_area_size/entire_scrollable_area;
         float q = panel_scroll/entire_scrollable_area;
+        Rectangle scroll_bar_area = {
+            .x = panel_boundary.x + panel_boundary.width - scroll_bar_width,
+            .y = panel_boundary.y,
+            .width = scroll_bar_width,
+            .height = panel_boundary.height,
+        };
+        // TODO: some sort of color for the scroll bar background
+        //DrawRectangleRounded(scroll_bar_area, 0.8, 20, RED);
         Rectangle scroll_bar_boundary = {
             .x = panel_boundary.x + panel_boundary.width - scroll_bar_width,
             .y = panel_boundary.y + panel_boundary.height*q,
@@ -544,6 +607,14 @@ static void tracks_panel(Rectangle panel_boundary)
                     scrolling = true;
                     scrolling_mouse_offset = mouse.y - scroll_bar_boundary.y;
                 }
+            } else if (CheckCollisionPointRec(mouse, scroll_bar_area)) {
+                if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
+                    if (mouse.y < scroll_bar_boundary.y) {
+                        panel_velocity += item_size*16;
+                    } else if (scroll_bar_boundary.y + scroll_bar_boundary.height < mouse.y){
+                        panel_velocity += -item_size*16;
+                    }
+                }
             }
         }
     }
@@ -551,15 +622,13 @@ static void tracks_panel(Rectangle panel_boundary)
     EndScissorMode();
 }
 
-typedef enum {
-    BS_NONE      = 0, // 00
-    BS_HOVEROVER = 1, // 01
-    BS_CLICKED   = 2, // 10
-} Button_State;
-
-static int fullscreen_button(Rectangle preview_boundary)
+#define fullscreen_button(preview_boundary) \
+    fullscreen_button_with_loc(__FILE__, __LINE__, preview_boundary)
+static int fullscreen_button_with_loc(const char *file, int line, Rectangle preview_boundary)
 {
-    Vector2 mouse = GetMousePosition();
+    uint64_t id = DJB2_INIT;
+    id = djb2(id, file, strlen(file));
+    id = djb2(id, &line, sizeof(line));
 
     Rectangle fullscreen_button_boundary = {
         preview_boundary.x + preview_boundary.width - HUD_BUTTON_SIZE - HUD_BUTTON_MARGIN,
@@ -568,10 +637,9 @@ static int fullscreen_button(Rectangle preview_boundary)
         HUD_BUTTON_SIZE,
     };
 
-    int hoverover = CheckCollisionPointRec(mouse, fullscreen_button_boundary);
-    int clicked = hoverover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    int state = button(id, fullscreen_button_boundary);
 
-    Color color = hoverover ? COLOR_HUD_BUTTON_HOVEROVER : COLOR_HUD_BUTTON_BACKGROUND;
+    Color color = state & BS_HOVEROVER ? COLOR_HUD_BUTTON_HOVEROVER : COLOR_HUD_BUTTON_BACKGROUND;
 
     DrawRectangleRounded(fullscreen_button_boundary, 0.5, 20, color);
     float icon_size = 512;
@@ -584,13 +652,13 @@ static int fullscreen_button(Rectangle preview_boundary)
     };
     size_t icon_index;
     if (!p->fullscreen) {
-        if (!hoverover) {
+        if (!(state & BS_HOVEROVER)) {
             icon_index = 0;
         } else {
             icon_index = 1;
         }
     } else {
-        if (!hoverover) {
+        if (!(state & BS_HOVEROVER)) {
             icon_index = 2;
         } else {
             icon_index = 3;
@@ -599,7 +667,7 @@ static int fullscreen_button(Rectangle preview_boundary)
     Rectangle source = {icon_size*icon_index, 0, icon_size, icon_size};
     DrawTexturePro(assets_texture("./resources/icons/fullscreen.png"), source, dest, CLITERAL(Vector2){0}, 0, ColorBrightness(WHITE, -0.10));
 
-    return (clicked<<1) | hoverover;
+    return state;
 }
 
 static float slider_get_value(float x, float lox, float hix)
@@ -611,8 +679,10 @@ static float slider_get_value(float x, float lox, float hix)
     return x;
 }
 
-static void horz_slider(Rectangle boundary, float *value, bool *dragging)
+static bool horz_slider(Rectangle boundary, float *value, bool *dragging)
 {
+    bool updated = false;
+
     Vector2 mouse = GetMousePosition();
 
     Vector2 startPos = {
@@ -649,33 +719,40 @@ static void horz_slider(Rectangle boundary, float *value, bool *dragging)
             }
         } else {
             if (CheckCollisionPointRec(mouse, boundary)) {
-                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     *value = slider_get_value(mouse.x, startPos.x, endPos.x);
+                    updated = true;
                 }
             }
         }
     } else {
         *value = slider_get_value(mouse.x, startPos.x, endPos.x);
+        updated = true;
 
         if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
             *dragging = false;
         }
     }
+    return updated;
 }
 
-static void volume_slider(Rectangle preview_boundary)
+#define volume_slider(preview_boundary) \
+    volume_slider_with_location(__FILE__, __LINE__, preview_boundary)
+static bool volume_slider_with_location(const char *file, int line, Rectangle preview_boundary)
 {
     Vector2 mouse = GetMousePosition();
 
     static int expanded = false;
     static bool dragging = false;
+    static float saved_volume = 0.0f;
 
-    Rectangle volume_slider_boundary = {
+    Rectangle volume_icon_boundary = {
         preview_boundary.x + HUD_BUTTON_MARGIN,
         preview_boundary.y + HUD_BUTTON_MARGIN,
         HUD_BUTTON_SIZE,
         HUD_BUTTON_SIZE,
     };
+    Rectangle volume_slider_boundary = volume_icon_boundary;
 
     size_t expanded_slots = 6;
     if (expanded) volume_slider_boundary.width = expanded_slots*HUD_BUTTON_SIZE;
@@ -699,7 +776,6 @@ static void volume_slider(Rectangle preview_boundary)
         icon_size*scale
     };
 
-    // TODO: toggle mute on clicking the icon
     // TODO: animate volume slider expansion
     float volume = GetMasterVolume();
 
@@ -717,19 +793,43 @@ static void volume_slider(Rectangle preview_boundary)
 
     DrawTexturePro(assets_texture("./resources/icons/volume.png"), source, dest, CLITERAL(Vector2){0}, 0, ColorBrightness(WHITE, -0.10));
 
+    bool updated = false;
+
     if (expanded) {
-        horz_slider(CLITERAL(Rectangle) {
+        updated = horz_slider(CLITERAL(Rectangle) {
             .x = volume_slider_boundary.x + HUD_BUTTON_SIZE,
             .y = volume_slider_boundary.y,
             .width = (expanded_slots - 1)*HUD_BUTTON_SIZE,
             .height = HUD_BUTTON_SIZE,
         }, &volume, &dragging);
         float mouse_wheel_step = 0.05;
-        volume += GetMouseWheelMove()*mouse_wheel_step;
+        float wheel_delta = GetMouseWheelMove();
+        volume += wheel_delta*mouse_wheel_step;
         if (volume < 0) volume = 0;
         if (volume > 1) volume = 1;
         SetMasterVolume(volume);
     }
+
+    // Toggle mute
+
+    uint64_t id = DJB2_INIT;
+    id = djb2(id, file, strlen(file));
+    id = djb2(id, &line, sizeof(line));
+    if (
+        IsKeyPressed(KEY_TOGGLE_MUTE) ||
+        (button(id, volume_icon_boundary) & BS_CLICKED)
+    ) {
+        if (volume > 0) {
+            saved_volume = volume;
+            volume = 0;
+        } else {
+            volume = saved_volume;
+        }
+        SetMasterVolume(volume);
+        updated = true;
+    }
+
+    return dragging || updated;
 }
 
 static void preview_screen(void)
@@ -764,8 +864,8 @@ static void preview_screen(void)
         UnloadDroppedFiles(droppedFiles);
     }
 
-#ifdef FEATURE_MICROPHONE
-    if (IsKeyPressed(KEY_M)) {
+#ifdef MUSIALIZER_MICROPHONE
+    if (IsKeyPressed(KEY_CAPTURE)) {
         // TODO: let the user choose their mic
         ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
         deviceConfig.capture.format = ma_format_f32;
@@ -789,13 +889,14 @@ static void preview_screen(void)
         }
         p->capturing = true;
     }
-#endif // FEATURE_MICROPHONE
+#endif // MUSIALIZER_MICROPHONE
 
     Track *track = current_track();
     if (track) { // The music is loaded and ready
         UpdateMusicStream(track->music);
 
-        if (IsKeyPressed(KEY_SPACE)) {
+        // TODO: toggle play with mouse click on the preview window
+        if (IsKeyPressed(KEY_TOGGLE_PLAY)) {
             if (IsMusicStreamPlaying(track->music)) {
                 PauseMusicStream(track->music);
             } else {
@@ -803,7 +904,7 @@ static void preview_screen(void)
             }
         }
 
-        if (IsKeyPressed(KEY_R)) {
+        if (IsKeyPressed(KEY_RENDER)) {
             StopMusicStream(track->music);
 
             fft_clean();
@@ -818,7 +919,7 @@ static void preview_screen(void)
             SetTraceLogLevel(LOG_WARNING);
         }
 
-        if (IsKeyPressed(KEY_F)) {
+        if (IsKeyPressed(KEY_FULLSCREEN)) {
             p->fullscreen = !p->fullscreen;
         }
 
@@ -858,8 +959,7 @@ static void preview_screen(void)
                 int state = fullscreen_button(preview_boundary);
                 if (state & BS_CLICKED) p->fullscreen = !p->fullscreen;
                 if (!(state & BS_HOVEROVER)) hud_timer -= GetFrameTime();
-                // TODO: the state of volume slider does not reset hud_timer
-                volume_slider(preview_boundary);
+                if (volume_slider(preview_boundary)) hud_timer = HUD_TIMER_SECS;
             }
 
             Vector2 delta = GetMouseDelta();
@@ -880,12 +980,12 @@ static void preview_screen(void)
             fft_render(preview_boundary, m);
             EndScissorMode();
 
-            tracks_panel(CLITERAL(Rectangle) {
+            tracks_panel((CLITERAL(Rectangle) {
                 .x = 0,
                 .y = 0,
                 .width = tracks_panel_width,
                 .height = preview_boundary.height,
-            });
+            }));
 
             timeline(CLITERAL(Rectangle) {
                 .x = 0,
@@ -899,7 +999,6 @@ static void preview_screen(void)
             }
             volume_slider(preview_boundary);
         }
-
     } else { // We are waiting for the user to Drag&Drop the Music
         const char *label = "Drag&Drop Music Here";
         Color color = WHITE;
@@ -912,14 +1011,14 @@ static void preview_screen(void)
     }
 }
 
-#ifdef FEATURE_MICROPHONE
+#ifdef MUSIALIZER_MICROPHONE
 static void capture_screen(void)
 {
     int w = GetRenderWidth();
     int h = GetRenderHeight();
 
     if (p->microphone != NULL) {
-        if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_M)) {
+        if (IsKeyPressed(KEY_CAPTURE) || IsKeyPressed(KEY_ESCAPE)) {
             ma_device_uninit(p->microphone);
             p->microphone = NULL;
             p->capturing = false;
@@ -952,7 +1051,7 @@ static void capture_screen(void)
         DrawTextEx(p->font, label, position, fontSize, 0, color);
     }
 }
-#endif // FEATURE_MICROPHONE
+#endif // MUSIALIZER_MICROPHONE
 
 void rendering_screen(void)
 {
@@ -1134,7 +1233,7 @@ void plug_update(void)
     ClearBackground(COLOR_BACKGROUND);
 
     if (!p->rendering) { // We are in the Preview Mode
-#ifdef FEATURE_MICROPHONE
+#ifdef MUSIALIZER_MICROPHONE
         if (p->capturing) {
             capture_screen();
         } else {
@@ -1142,14 +1241,10 @@ void plug_update(void)
         }
 #else
         preview_screen();
-#endif // FEATURE_MICROPHONE
+#endif // MUSIALIZER_MICROPHONE
     } else { // We are in the Rendering Mode
         rendering_screen();
     }
 
     EndDrawing();
 }
-
-// TODO: introduce the notion of active UI element
-// To get rid of the bugs when you dragging something and unpress the mouse
-// over another element and accidentally activate it.
