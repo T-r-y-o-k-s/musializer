@@ -38,10 +38,13 @@
 #define COLOR_TIMELINE_BACKGROUND     ColorBrightness(COLOR_BACKGROUND, -0.3)
 #define COLOR_HUD_BUTTON_BACKGROUND   COLOR_TRACK_BUTTON_BACKGROUND
 #define COLOR_HUD_BUTTON_HOVEROVER    COLOR_TRACK_BUTTON_HOVEROVER
+#define COLOR_POPUP_BACKGROUND        ColorFromHSV(0, 0.75, 0.8)
 #define HUD_TIMER_SECS 1.0f
 #define HUD_BUTTON_SIZE 50
 #define HUD_BUTTON_MARGIN 50
 #define HUD_ICON_SCALE 0.5
+#define HUD_POPUP_LIFETIME_SECS 2.0f
+#define HUD_POPUP_SLIDEIN_SECS 0.1f
 
 #define KEY_TOGGLE_PLAY KEY_SPACE
 #define KEY_RENDER      KEY_R
@@ -126,6 +129,22 @@ typedef struct {
 } Assets;
 
 typedef struct {
+    float lifetime;
+} Popup;
+
+#define PT_GET(pt, index) (assert(index < (pt)->count), &(pt)->items[((pt)->begin + index)%POPUP_TRAY_CAPACITY])
+#define PT_FIRST(pt) PT_GET((pt), 0)
+#define PT_LAST(pt) PT_GET((pt), (pt)->count - 1)
+
+#define POPUP_TRAY_CAPACITY 20
+typedef struct {
+    Popup items[POPUP_TRAY_CAPACITY];
+    size_t begin;
+    size_t count;
+    float slide;
+} Popup_Tray;
+
+typedef struct {
     Assets assets;
 
     // Visualizer
@@ -154,6 +173,8 @@ typedef struct {
     float out_smear[FFT_SIZE];
 
     uint64_t active_button_id;
+
+    Popup_Tray pt;
 
 #ifdef MUSIALIZER_MICROPHONE
     // Microphone
@@ -420,10 +441,20 @@ static Track *current_track(void)
     return NULL;
 }
 
-static void error_load_file_popup(void)
+
+static void popup_tray_push(Popup_Tray *pt)
 {
-    // TODO: implement annoying popup that indicates that we could not load the file
-    TraceLog(LOG_ERROR, "Could not load file");
+    if (pt->count < POPUP_TRAY_CAPACITY) {
+        if (pt->begin == 0) {
+            pt->begin = POPUP_TRAY_CAPACITY - 1;
+        } else {
+            pt->begin -= 1;
+        }
+        pt->count += 1;
+
+        pt->slide += HUD_POPUP_SLIDEIN_SECS;
+        PT_FIRST(pt)->lifetime = HUD_POPUP_LIFETIME_SECS + pt->slide;
+    }
 }
 
 static void timeline(Rectangle timeline_boundary, Track *track)
@@ -461,7 +492,7 @@ typedef enum {
     BS_CLICKED   = 2, // 10
 } Button_State;
 
-static int button(uint64_t id, Rectangle boundary)
+static int button_with_id(uint64_t id, Rectangle boundary)
 {
     Vector2 mouse = GetMousePosition();
     int hoverover = CheckCollisionPointRec(mouse, boundary);
@@ -483,7 +514,7 @@ static int button(uint64_t id, Rectangle boundary)
 
 #define DJB2_INIT 5381
 
-uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
+static uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
 {
     const uint8_t *bytes = buf;
     for (size_t i = 0; i < buf_sz; ++i) {
@@ -491,6 +522,16 @@ uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
     }
     return hash;
 }
+
+static int button_with_location(const char *file, int line, Rectangle boundary)
+{
+    uint64_t id = DJB2_INIT;
+    id = djb2(id, file, strlen(file));
+    id = djb2(id, &line, sizeof(line));
+    return button_with_id(id, boundary);
+}
+
+#define button(boundary) button_with_location(__FILE__, __LINE__, boundary)
 
 #define tracks_panel(panel_boundary) \
     tracks_panel_with_location(__FILE__, __LINE__, panel_boundary)
@@ -544,7 +585,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
         if (((int) i != p->current_track)) {
             uint64_t item_id = djb2(id, &i, sizeof(i));
 
-            int state = button(item_id, GetCollisionRec(panel_boundary, item_boundary));
+            int state = button_with_id(item_id, GetCollisionRec(panel_boundary, item_boundary));
             if (state & BS_HOVEROVER) {
                 color = COLOR_TRACK_BUTTON_HOVEROVER;
             } else {
@@ -637,7 +678,7 @@ static int fullscreen_button_with_loc(const char *file, int line, Rectangle prev
         HUD_BUTTON_SIZE,
     };
 
-    int state = button(id, fullscreen_button_boundary);
+    int state = button_with_id(id, fullscreen_button_boundary);
 
     Color color = state & BS_HOVEROVER ? COLOR_HUD_BUTTON_HOVEROVER : COLOR_HUD_BUTTON_BACKGROUND;
 
@@ -817,7 +858,7 @@ static bool volume_slider_with_location(const char *file, int line, Rectangle pr
     id = djb2(id, &line, sizeof(line));
     if (
         IsKeyPressed(KEY_TOGGLE_MUTE) ||
-        (button(id, volume_icon_boundary) & BS_CLICKED)
+        (button_with_id(id, volume_icon_boundary) & BS_CLICKED)
     ) {
         if (volume > 0) {
             saved_volume = volume;
@@ -832,36 +873,77 @@ static bool volume_slider_with_location(const char *file, int line, Rectangle pr
     return dragging || updated;
 }
 
+static void popup_tray(Popup_Tray *pt, Rectangle preview_boundary)
+{
+    float dt = GetFrameTime();
+    if (pt->slide > 0) {
+        pt->slide -= dt;
+    }
+    if (pt->slide < 0) {
+        pt->slide = 0;
+    }
+
+    float popup_width = 250;
+    float popup_height = 75;
+    float popup_padding = 20;
+    for (size_t i = 0; i < pt->count; ++i) {
+        Popup *it = PT_GET(pt, i);
+        it->lifetime -= dt;
+
+        float t = it->lifetime/HUD_POPUP_LIFETIME_SECS;
+        float alpha = t >= 0.5f ? 1.0f : t/0.5f;
+
+        float q = pt->slide / HUD_POPUP_SLIDEIN_SECS;
+
+        Rectangle popup_boundary = {
+            .x = preview_boundary.x + preview_boundary.width - popup_width - popup_padding,
+            .y = preview_boundary.y + preview_boundary.height - (i + 1 - q)*(popup_height + popup_padding),
+            .width = popup_width,
+            .height = popup_height,
+        };
+        DrawRectangleRounded(popup_boundary, 0.3, 20, ColorAlpha(COLOR_POPUP_BACKGROUND, alpha));
+        const char *text = "Could not load file";
+        float fontSize = popup_boundary.width*0.15;
+        Vector2 size = MeasureTextEx(p->font, text, fontSize, 0);
+        Vector2 position = {
+            .x = popup_boundary.x + popup_boundary.width/2 - size.x/2,
+            .y = popup_boundary.y + popup_boundary.height/2 - size.y/2,
+        };
+        DrawTextEx(p->font, text, position, fontSize, 0, ColorAlpha(WHITE, alpha));
+    }
+
+    while (pt->count > 0 && PT_LAST(pt)->lifetime <= 0) {
+        pt->count -= 1;
+    }
+}
+
 static void preview_screen(void)
 {
-    int w = GetRenderWidth();
-    int h = GetRenderHeight();
+    int w = GetScreenWidth();
+    int h = GetScreenHeight();
 
     if (IsFileDropped()) {
         FilePathList droppedFiles = LoadDroppedFiles();
         for (size_t i = 0; i < droppedFiles.count; ++i) {
-            char *file_path = strdup(droppedFiles.paths[i]);
-
-            Track *track = current_track();
-            if (track) StopMusicStream(track->music);
-
-            Music music = LoadMusicStream(file_path);
-
+            Music music = LoadMusicStream(droppedFiles.paths[i]);
             if (IsMusicReady(music)) {
                 AttachAudioStreamProcessor(music.stream, callback);
-                PlayMusicStream(music);
-
+                char *file_path = strdup(droppedFiles.paths[i]);
+                assert(file_path != NULL);
                 nob_da_append(&p->tracks, (CLITERAL(Track) {
                     .file_path = file_path,
                     .music = music,
                 }));
-                p->current_track = p->tracks.count - 1;
             } else {
-                free(file_path);
-                error_load_file_popup();
+                popup_tray_push(&p->pt);
             }
         }
         UnloadDroppedFiles(droppedFiles);
+
+        if (current_track() == NULL && p->tracks.count > 0) {
+            p->current_track = 0;
+            PlayMusicStream(p->tracks.items[0].music);
+        }
     }
 
 #ifdef MUSIALIZER_MICROPHONE
@@ -895,7 +977,6 @@ static void preview_screen(void)
     if (track) { // The music is loaded and ready
         UpdateMusicStream(track->music);
 
-        // TODO: toggle play with mouse click on the preview window
         if (IsKeyPressed(KEY_TOGGLE_PLAY)) {
             if (IsMusicStreamPlaying(track->music)) {
                 PauseMusicStream(track->music);
@@ -954,6 +1035,23 @@ static void preview_screen(void)
             };
             fft_render(preview_boundary, m);
 
+#if 0
+            // TODO: there must be a visual clue that we paused the music.
+            // Cause when you accidentally click on the preview it feels weird.
+            // TODO: Current UI paradigm can handle with the buttons overlap.
+            // The preview "button" overlaps with volume slider, fullscreen and other
+            // overlay UI elements
+            if (button(preview_boundary) & BS_CLICKED) {
+                if (IsMusicStreamPlaying(track->music)) {
+                    PauseMusicStream(track->music);
+                } else {
+                    ResumeMusicStream(track->music);
+                }
+            }
+#else
+            (void) button_with_location; // NOTE: the disabled code is the only user of this functions right now
+#endif
+
             static float hud_timer = HUD_TIMER_SECS;
             if (hud_timer > 0.0) {
                 int state = fullscreen_button(preview_boundary);
@@ -966,6 +1064,8 @@ static void preview_screen(void)
             if (fabsf(delta.x) + fabsf(delta.y) > 0.0) {
                 hud_timer = HUD_TIMER_SECS;
             }
+
+            popup_tray(&p->pt, preview_boundary);
         } else {
             float tracks_panel_width = w*0.25;
             float timeline_height = h*0.20;
@@ -976,8 +1076,26 @@ static void preview_screen(void)
                 .height = h - timeline_height
             };
 
+#if 0
+            // TODO: there must be a visual clue that we paused the music.
+            // Cause when you accidentally click on the preview it feels weird.
+            // TODO: Current UI paradigm can handle with the buttons overlap.
+            // The preview "button" overlaps with volume slider, fullscreen and other
+            // overlay UI elements
+            if (button(preview_boundary) & BS_CLICKED) {
+                if (IsMusicStreamPlaying(track->music)) {
+                    PauseMusicStream(track->music);
+                } else {
+                    ResumeMusicStream(track->music);
+                }
+            }
+#else
+            (void) button_with_location; // NOTE: the disabled code is the only user of this functions right now
+#endif
+
             BeginScissorMode(preview_boundary.x, preview_boundary.y, preview_boundary.width, preview_boundary.height);
             fft_render(preview_boundary, m);
+            popup_tray(&p->pt, preview_boundary);
             EndScissorMode();
 
             tracks_panel((CLITERAL(Rectangle) {
@@ -1008,14 +1126,20 @@ static void preview_screen(void)
             h/2 - size.y/2,
         };
         DrawTextEx(p->font, label, position, p->font.baseSize, 0, color);
+        popup_tray(&p->pt, CLITERAL(Rectangle) {
+            .x = 0,
+            .y = 0,
+            .width = w,
+            .height = h,
+        });
     }
 }
 
 #ifdef MUSIALIZER_MICROPHONE
 static void capture_screen(void)
 {
-    int w = GetRenderWidth();
-    int h = GetRenderHeight();
+    int w = GetScreenWidth();
+    int h = GetScreenHeight();
 
     if (p->microphone != NULL) {
         if (IsKeyPressed(KEY_CAPTURE) || IsKeyPressed(KEY_ESCAPE)) {
@@ -1053,10 +1177,10 @@ static void capture_screen(void)
 }
 #endif // MUSIALIZER_MICROPHONE
 
-void rendering_screen(void)
+static void rendering_screen(void)
 {
-    int w = GetRenderWidth();
-    int h = GetRenderHeight();
+    int w = GetScreenWidth();
+    int h = GetScreenHeight();
 
     Track *track = current_track();
     NOB_ASSERT(track != NULL);
