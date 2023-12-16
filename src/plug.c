@@ -917,6 +917,30 @@ static void popup_tray(Popup_Tray *pt, Rectangle preview_boundary)
     }
 }
 
+//@argv
+void plug_load_music(char** files, size_t files_count) {
+    for (size_t i = 0; i < files_count; ++i) {
+        Music music = LoadMusicStream(files[i]);
+        if (IsMusicReady(music)) {
+            AttachAudioStreamProcessor(music.stream, callback);
+            char *file_path = strdup(files[i]);
+            assert(file_path != NULL);
+
+            nob_da_append(&p->tracks, (CLITERAL(Track) {
+                .file_path = file_path,
+                .music = music,
+            }));
+        } else { // unsupported file
+            popup_tray_push(&p->pt);
+        }
+
+        if (current_track() == NULL && p->tracks.count > 0) {
+            p->current_track = 0;
+            PlayMusicStream(p->tracks.items[0].music);
+        }
+    }
+}
+
 static void preview_screen(void)
 {
     int w = GetScreenWidth();
@@ -924,26 +948,13 @@ static void preview_screen(void)
 
     if (IsFileDropped()) {
         FilePathList droppedFiles = LoadDroppedFiles();
+        //@argv
+        char* files[droppedFiles.count];
         for (size_t i = 0; i < droppedFiles.count; ++i) {
-            Music music = LoadMusicStream(droppedFiles.paths[i]);
-            if (IsMusicReady(music)) {
-                AttachAudioStreamProcessor(music.stream, callback);
-                char *file_path = strdup(droppedFiles.paths[i]);
-                assert(file_path != NULL);
-                nob_da_append(&p->tracks, (CLITERAL(Track) {
-                    .file_path = file_path,
-                    .music = music,
-                }));
-            } else {
-                popup_tray_push(&p->pt);
-            }
+            files[i] = strdup(droppedFiles.paths[i]);
         }
+        plug_load_music(files, droppedFiles.count);
         UnloadDroppedFiles(droppedFiles);
-
-        if (current_track() == NULL && p->tracks.count > 0) {
-            p->current_track = 0;
-            PlayMusicStream(p->tracks.items[0].music);
-        }
     }
 
 #ifdef MUSIALIZER_MICROPHONE
