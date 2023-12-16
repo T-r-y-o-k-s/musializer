@@ -1007,6 +1007,7 @@ static void preview_screen(void)
         // TODO: add button to start rendering
         // TODO: add tooltips to all the buttons that describe their function and associated keyboard shortcuts
 
+        //@playlist
         // the mess below checks whether the current track finished playing
         if (round((GetMusicTimeLength(track->music) - GetMusicTimePlayed(track->music))*2*10) == 0) {
             // The difference between the total length and the time played scales correctly with the length. 
