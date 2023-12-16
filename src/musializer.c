@@ -12,9 +12,20 @@
 #include <signal.h> // needed for sigaction()
 #endif // _WIN32
 
+//@argv
+char *shift_args(int *argc, char ***argv)
+{
+    assert(*argc > 0);
+    char *result = **argv;
+    (*argv) += 1;
+    (*argc) -= 1;
+    return result;
+}
+
 #include "./hotreload.h"
 
-int main(void)
+//@argv
+int main(int argc, char** argv)
 {
 #ifndef _WIN32
     // NOTE: This is needed because if the pipe between Musializer and FFmpeg breaks
@@ -28,6 +39,9 @@ int main(void)
 
     if (!reload_libplug()) return 1;
 
+    //@argv
+    shift_args(&argc, &argv);
+
     Image logo = LoadImage("./resources/logo/logo-256.png");
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     size_t factor = 80;
@@ -38,6 +52,12 @@ int main(void)
     InitAudioDevice();
 
     plug_init();
+
+    //@argv
+    if (argc > 0) {
+         plug_load_music(argv, argc);
+    }
+    
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_H)) {
             void *state = plug_pre_reload();
