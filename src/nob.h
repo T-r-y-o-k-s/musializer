@@ -219,6 +219,20 @@ bool nob_rename(const char *old_path, const char *new_path);
 int nob_needs_rebuild(const char *output_path, const char **input_paths, size_t input_paths_count);
 int nob_needs_rebuild1(const char *output_path, const char *input_path);
 int nob_file_exists(const char *file_path);
+const char *nob_get_file_ext(const char *filename);
+
+#ifndef NOB_ADD_WIN32_EXT
+#   if _WIN32
+#       define NOB_ADD_WIN32_EXT(filename)                                                   \
+            do {                                                                             \
+                if (!(strcmp(nob_get_file_ext(filename), "exe") == 0)) {                     \
+                    strcat(filename, ".exe");                                                \
+                }                                                                            \
+            } while(0)
+#   else 
+#       define NOB_ADD_WIN32_EXT(filename)
+#   endif
+#endif
 
 // TODO: add MinGW support for Go Rebuild Urself™ Technology
 #ifndef NOB_REBUILD_URSELF
@@ -261,7 +275,8 @@ int nob_file_exists(const char *file_path);
     do {                                                                                     \
         const char *source_path = __FILE__;                                                  \
         assert(argc >= 1);                                                                   \
-        const char *binary_path = argv[0];                                                   \
+        char *binary_path = argv[0];                                                         \
+        NOB_ADD_WIN32_EXT(binary_path);                                                      \
                                                                                              \
         int rebuild_is_needed = nob_needs_rebuild(binary_path, &source_path, 1);             \
         if (rebuild_is_needed < 0) exit(1);                                                  \
@@ -1067,6 +1082,12 @@ int nob_file_exists(const char *file_path)
     }
     return 1;
 #endif
+}
+
+const char *nob_get_file_ext(const char *filename) {
+    const char *dot = strrchr(filename, '.');
+    if(!dot || dot == filename) return "";
+    return dot + 1;
 }
 
 // minirent.h SOURCE BEGIN ////////////////////////////////////////
