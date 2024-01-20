@@ -43,7 +43,7 @@ int main(int argc, char** argv)
     shift_args(&argc, &argv);
 
     Image logo = LoadImage("./resources/logo/logo-256.png");
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN);
     size_t factor = 80;
     InitWindow(factor*16, factor*9, "Musializer");
     SetWindowIcon(logo);
